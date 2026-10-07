@@ -1,0 +1,94 @@
+name: post (11:00 / 15:00 / 20:00 JST)
+
+# UaFloorsの投稿枠は 11:00 / 15:00 / 20:00 の3つ。予約は queue/YYYY-MM-DD_HHMM.json。
+# 枠の時刻にフィード、30分後にストーリーズを出す（キューが無い枠はすぐ終わる）。
+# GitHubの定時実行は混雑で遅れるので、いりこと同じく早めに起動して publish.py 側で
+# 時刻まで待つ。予備を2本置き、.done マーカーで二重投稿を防ぐ。
+on:
+  schedule:
+    # 11:00枠（JST 9:43 本命 / 10:43 予備1 / 11:13 予備2）
+    - cron: '43 0 * * *'
+    - cron: '43 1 * * *'
+    - cron: '13 2 * * *'
+    # 15:00枠（JST 13:43 / 14:43 / 15:13）
+    - cron: '43 4 * * *'
+    - cron: '43 5 * * *'
+    - cron: '13 6 * * *'
+    # 20:00枠（JST 18:43 / 19:43 / 20:13）
+    - cron: '43 9 * * *'
+    - cron: '43 10 * * *'
+    - cron: '13 11 * * *'
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: '枠（1100 / 1500 / 2000）。空なら現在時刻から判定'
+        type: string
+        default: ''
+      dry_run:
+        description: 'ドライラン（投稿せず内容表示のみ）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  # 予備の実行が来たら待機中の古い実行はキャンセル（同じ枠のうちに引き継ぐ）
+  group: ua-post
+  cancel-in-progress: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 枠を判定
+        id: slot
+        run: |
+          S="${{ inputs.slot }}"
+          if [ -z "$S" ]; then
+            H=$(TZ=Asia/Tokyo date +%H)
+            if   [ "$H" -lt 13 ]; then S=1100
+            elif [ "$H" -lt 18 ]; then S=1500
+            else S=2000; fi
+          fi
+          echo "枠: $S"
+          echo "slot=$S" >> "$GITHUB_OUTPUT"
+
+      - name: フィード投稿
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ vars.IG_USER_ID }}
+          SLOT: feed
+          QUEUE_TAG: _${{ steps.slot.outputs.slot }}
+          DRY_RUN: ${{ inputs.dry_run == true && '1' || '' }}
+        run: |
+          S=${{ steps.slot.outputs.slot }}
+          TARGET_TIME=${S:0:2}:00 python3 scripts/publish.py
+
+      - name: doneマーカーを記録（フィード）
+        run: |
+          git config user.name "ua-autopost-bot"
+          git config user.email "actions@github.com"
+          git add queue/*.done 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "feed posted $(date -u +%F)" && git pull -q --rebase && git push)
+
+      - name: ストーリーズ投稿（30分後）
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ vars.IG_USER_ID }}
+          SLOT: story
+          QUEUE_TAG: _${{ steps.slot.outputs.slot }}
+          DRY_RUN: ${{ inputs.dry_run == true && '1' || '' }}
+        run: |
+          S=${{ steps.slot.outputs.slot }}
+          TARGET_TIME=${S:0:2}:30 python3 scripts/publish.py
+
+      - name: doneマーカーを記録（ストーリーズ）
+        if: always()
+        run: |
+          git config user.name "ua-autopost-bot"
+          git config user.email "actions@github.com"
+          git add queue/*.done 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "story posted $(date -u +%F)" && git pull -q --rebase && git push)
