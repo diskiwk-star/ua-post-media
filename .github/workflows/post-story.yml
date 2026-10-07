@@ -1,0 +1,48 @@
+name: post-story (5:30 JST)
+
+on:
+  schedule:
+    # 考え方は post-feed.yml と同じ。目標は5:30 JST。
+    - cron: '13 19 * * *'   # 19:13 UTC = 翌日 4:13 JST（本命・5:30まで待機）
+    - cron: '13 20 * * *'   # 20:13 UTC = 翌日 5:13 JST（予備1）
+    - cron: '13 21 * * *'   # 21:13 UTC = 翌日 6:13 JST（予備2・遅延時は即投稿）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'ドライラン（投稿せず内容表示のみ）'
+        type: boolean
+        default: false
+      target_time:
+        description: '投稿時刻（JST・HH:MM）。臨時投稿で時間を指定したいとき。空なら既定時刻'
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  # 予備の実行が来たら、待機中の古い実行はキャンセルする。
+  group: ua-post-story
+  cancel-in-progress: true
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish to Instagram (story slot)
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ vars.IG_USER_ID }}
+          SLOT: story
+          TARGET_TIME: ${{ inputs.target_time }}
+          DRY_RUN: ${{ inputs.dry_run == true && '1' || '' }}
+        run: python3 scripts/publish.py
+
+      - name: Commit done marker
+        run: |
+          git config user.name "ua-autopost-bot"
+          git config user.email "actions@github.com"
+          git add queue/*.done 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "story posted $(date -u +%F)" && git push)
